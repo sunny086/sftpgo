@@ -833,8 +833,8 @@ func GetEventRules(limit, offset int64, expectedStatusCode int) ([]dataprovider.
 }
 
 // GetQuotaScans gets active quota scans for users and checks the received HTTP Status code against expectedStatusCode.
-func GetQuotaScans(expectedStatusCode int) ([]dataprovider.ActiveQuotaScan, []byte, error) {
-	var quotaScans []dataprovider.ActiveQuotaScan
+func GetQuotaScans(expectedStatusCode int) ([]common.ActiveQuotaScan, []byte, error) {
+	var quotaScans []common.ActiveQuotaScan
 	var body []byte
 	resp, err := sendHTTPRequest(http.MethodGet, buildURLRelativeToBase(quotaScanPath), nil, "", getDefaultToken())
 	if err != nil {
@@ -920,7 +920,7 @@ func GetRetentionChecks(expectedStatusCode int) ([]common.ActiveRetentionChecks,
 }
 
 // StartRetentionCheck starts a new retention check
-func StartRetentionCheck(username string, retention []common.FolderRetention, expectedStatusCode int) ([]byte, error) {
+func StartRetentionCheck(username string, retention []dataprovider.FolderRetention, expectedStatusCode int) ([]byte, error) {
 	var body []byte
 	asJSON, _ := json.Marshal(retention)
 	resp, err := sendHTTPRequest(http.MethodPost, buildURLRelativeToBase(retentionBasePath, username, "check"),
@@ -1077,8 +1077,8 @@ func GetFolders(limit int64, offset int64, expectedStatusCode int) ([]vfs.BaseVi
 }
 
 // GetFoldersQuotaScans gets active quota scans for folders and checks the received HTTP Status code against expectedStatusCode.
-func GetFoldersQuotaScans(expectedStatusCode int) ([]dataprovider.ActiveVirtualFolderQuotaScan, []byte, error) {
-	var quotaScans []dataprovider.ActiveVirtualFolderQuotaScan
+func GetFoldersQuotaScans(expectedStatusCode int) ([]common.ActiveVirtualFolderQuotaScan, []byte, error) {
+	var quotaScans []common.ActiveVirtualFolderQuotaScan
 	var body []byte
 	resp, err := sendHTTPRequest(http.MethodGet, buildURLRelativeToBase(quotaScanVFolderPath), nil, "", getDefaultToken())
 	if err != nil {
@@ -1344,6 +1344,12 @@ func checkEventAction(expected, actual dataprovider.BaseEventAction) error {
 		return err
 	}
 	if err := compareEventActionEmailConfigFields(expected.Options.EmailConfig, actual.Options.EmailConfig); err != nil {
+		return err
+	}
+	if err := compareEventActionDataRetentionFields(expected.Options.RetentionConfig, actual.Options.RetentionConfig); err != nil {
+		return err
+	}
+	if err := compareEventActionFsConfigFields(expected.Options.FsConfig, actual.Options.FsConfig); err != nil {
 		return err
 	}
 	return compareEventActionHTTPConfigFields(expected.Options.HTTPConfig, actual.Options.HTTPConfig)
@@ -1861,6 +1867,9 @@ func compareHTTPFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error
 	if expected.HTTPConfig.SkipTLSVerify != actual.HTTPConfig.SkipTLSVerify {
 		return errors.New("HTTPFs skip_tls_verify mismatch")
 	}
+	if expected.SFTPConfig.EqualityCheckMode != actual.SFTPConfig.EqualityCheckMode {
+		return errors.New("HTTPFs equality_check_mode mismatch")
+	}
 	if err := checkEncryptedSecret(expected.HTTPConfig.Password, actual.HTTPConfig.Password); err != nil {
 		return fmt.Errorf("HTTPFs password mismatch: %v", err)
 	}
@@ -1882,6 +1891,9 @@ func compareSFTPFsConfig(expected *vfs.Filesystem, actual *vfs.Filesystem) error
 	}
 	if expected.SFTPConfig.BufferSize != actual.SFTPConfig.BufferSize {
 		return errors.New("SFTPFs buffer_size mismatch")
+	}
+	if expected.SFTPConfig.EqualityCheckMode != actual.SFTPConfig.EqualityCheckMode {
+		return errors.New("SFTPFs equality_check_mode mismatch")
 	}
 	if err := checkEncryptedSecret(expected.SFTPConfig.Password, actual.SFTPConfig.Password); err != nil {
 		return fmt.Errorf("SFTPFs password mismatch: %v", err)
@@ -2038,7 +2050,7 @@ func compareUserFiltersEqualFields(expected sdk.BaseUserFilters, actual sdk.Base
 	return nil
 }
 
-func compareUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
+func compareBaseUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
 	if len(expected.AllowedIP) != len(actual.AllowedIP) {
 		return errors.New("allowed IP mismatch")
 	}
@@ -2071,6 +2083,16 @@ func compareUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters
 	}
 	if expected.IsAnonymous != actual.IsAnonymous {
 		return errors.New("is_anonymous mismatch")
+	}
+	if expected.DefaultSharesExpiration != actual.DefaultSharesExpiration {
+		return errors.New("default_shares_expiration mismatch")
+	}
+	return nil
+}
+
+func compareUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
+	if err := compareBaseUserFilters(expected, actual); err != nil {
+		return err
 	}
 	if err := compareUserFilterSubStructs(expected, actual); err != nil {
 		return err
@@ -2232,6 +2254,48 @@ func compareEventActionEmailConfigFields(expected, actual dataprovider.EventActi
 	if expected.Body != actual.Body {
 		return errors.New("email body mismatch")
 	}
+	if len(expected.Attachments) != len(actual.Attachments) {
+		return errors.New("email attachments mismatch")
+	}
+	for _, v := range expected.Attachments {
+		if !util.Contains(actual.Attachments, v) {
+			return errors.New("email attachments content mismatch")
+		}
+	}
+	return nil
+}
+
+func compareEventActionFsConfigFields(expected, actual dataprovider.EventActionFilesystemConfig) error {
+	if expected.Type != actual.Type {
+		return errors.New("fs type mismatch")
+	}
+	if err := compareKeyValues(expected.Renames, actual.Renames); err != nil {
+		return errors.New("fs renames mismatch")
+	}
+	if len(expected.Deletes) != len(actual.Deletes) {
+		return errors.New("fs deletes mismatch")
+	}
+	for _, v := range expected.Deletes {
+		if !util.Contains(actual.Deletes, v) {
+			return errors.New("fs deletes content mismatch")
+		}
+	}
+	if len(expected.MkDirs) != len(actual.MkDirs) {
+		return errors.New("fs mkdirs mismatch")
+	}
+	for _, v := range expected.MkDirs {
+		if !util.Contains(actual.MkDirs, v) {
+			return errors.New("fs mkdir content mismatch")
+		}
+	}
+	if len(expected.Exist) != len(actual.Exist) {
+		return errors.New("fs exist mismatch")
+	}
+	for _, v := range expected.Exist {
+		if !util.Contains(actual.Exist, v) {
+			return errors.New("fs exist content mismatch")
+		}
+	}
 	return nil
 }
 
@@ -2244,6 +2308,34 @@ func compareEventActionCmdConfigFields(expected, actual dataprovider.EventAction
 	}
 	if err := compareKeyValues(expected.EnvVars, actual.EnvVars); err != nil {
 		return errors.New("cmd env vars mismatch")
+	}
+	return nil
+}
+
+func compareEventActionDataRetentionFields(expected, actual dataprovider.EventActionDataRetentionConfig) error {
+	if len(expected.Folders) != len(actual.Folders) {
+		return errors.New("retention folders mismatch")
+	}
+	for _, f1 := range expected.Folders {
+		found := false
+		for _, f2 := range actual.Folders {
+			if f1.Path == f2.Path {
+				found = true
+				if f1.Retention != f2.Retention {
+					return fmt.Errorf("retention mismatch for folder %s", f1.Path)
+				}
+				if f1.DeleteEmptyDirs != f2.DeleteEmptyDirs {
+					return fmt.Errorf("delete_empty_dirs mismatch for folder %s", f1.Path)
+				}
+				if f1.IgnoreUserPermissions != f2.IgnoreUserPermissions {
+					return fmt.Errorf("ignore_user_permissions mismatch for folder %s", f1.Path)
+				}
+				break
+			}
+		}
+		if !found {
+			return errors.New("retention folders mismatch")
+		}
 	}
 	return nil
 }

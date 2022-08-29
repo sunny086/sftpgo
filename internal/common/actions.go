@@ -43,7 +43,16 @@ var (
 	errUnconfiguredAction    = errors.New("no hook is configured for this action")
 	errNoHook                = errors.New("unable to execute action, no hook defined")
 	errUnexpectedHTTResponse = errors.New("unexpected HTTP hook response code")
+	hooksConcurrencyGuard    = make(chan struct{}, 150)
 )
+
+func startNewHook() {
+	hooksConcurrencyGuard <- struct{}{}
+}
+
+func hookEnded() {
+	<-hooksConcurrencyGuard
+}
 
 // ProtocolActions defines the action to execute on file operations and SSH commands
 type ProtocolActions struct {
@@ -102,7 +111,7 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 ) error {
 	hasNotifiersPlugin := plugin.Handler.HasNotifiers()
 	hasHook := util.Contains(Config.Actions.ExecuteOn, operation)
-	hasRules := dataprovider.EventManager.HasFsRules()
+	hasRules := eventManager.hasFsRules()
 	if !hasHook && !hasNotifiersPlugin && !hasRules {
 		return nil
 	}
@@ -113,7 +122,7 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 	}
 	var errRes error
 	if hasRules {
-		errRes = dataprovider.EventManager.HandleFsEvent(dataprovider.EventParams{
+		errRes = eventManager.handleFsEvent(EventParams{
 			Name:              notification.Username,
 			Event:             notification.Action,
 			Status:            notification.Status,
@@ -135,7 +144,12 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 				errRes = errHook
 			}
 		} else {
-			go actionHandler.Handle(notification) //nolint:errcheck
+			go func() {
+				startNewHook()
+				defer hookEnded()
+
+				actionHandler.Handle(notification) //nolint:errcheck
+			}()
 		}
 	}
 	return errRes

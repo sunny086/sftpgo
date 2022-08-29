@@ -45,21 +45,23 @@ import (
 
 // constants
 const (
-	logSender         = "common"
-	uploadLogSender   = "Upload"
-	downloadLogSender = "Download"
-	renameLogSender   = "Rename"
-	rmdirLogSender    = "Rmdir"
-	mkdirLogSender    = "Mkdir"
-	symlinkLogSender  = "Symlink"
-	removeLogSender   = "Remove"
-	chownLogSender    = "Chown"
-	chmodLogSender    = "Chmod"
-	chtimesLogSender  = "Chtimes"
-	truncateLogSender = "Truncate"
-	operationDownload = "download"
-	operationUpload   = "upload"
-	operationDelete   = "delete"
+	logSender              = "common"
+	uploadLogSender        = "Upload"
+	downloadLogSender      = "Download"
+	renameLogSender        = "Rename"
+	rmdirLogSender         = "Rmdir"
+	mkdirLogSender         = "Mkdir"
+	symlinkLogSender       = "Symlink"
+	removeLogSender        = "Remove"
+	chownLogSender         = "Chown"
+	chmodLogSender         = "Chmod"
+	chtimesLogSender       = "Chtimes"
+	truncateLogSender      = "Truncate"
+	operationDownload      = "download"
+	operationUpload        = "upload"
+	operationFirstDownload = "first-download"
+	operationFirstUpload   = "first-upload"
+	operationDelete        = "delete"
 	// Pre-download action name
 	OperationPreDownload = "pre-download"
 	// Pre-upload action name
@@ -100,6 +102,7 @@ const (
 	ProtocolHTTPShare     = "HTTPShare"
 	ProtocolDataRetention = "DataRetention"
 	ProtocolOIDC          = "OIDC"
+	protocolEventAction   = "EventAction"
 )
 
 // Upload modes
@@ -138,11 +141,11 @@ var (
 	// Config is the configuration for the supported protocols
 	Config Configuration
 	// Connections is the list of active connections
-	Connections               ActiveConnections
-	transfersChecker          TransfersChecker
-	periodicTimeoutTicker     *time.Ticker
-	periodicTimeoutTickerDone chan bool
-	supportedProtocols        = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
+	Connections ActiveConnections
+	// QuotaScans is the list of active quota scans
+	QuotaScans         ActiveScans
+	transfersChecker   TransfersChecker
+	supportedProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
 		ProtocolHTTP, ProtocolHTTPShare, ProtocolOIDC}
 	disconnHookProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP}
 	// the map key is the protocol, for each protocol we can have multiple rate limiters
@@ -157,7 +160,7 @@ func Initialize(c Configuration, isShared int) error {
 	Config.ProxyAllowed = util.RemoveDuplicates(Config.ProxyAllowed, true)
 	Config.idleLoginTimeout = 2 * time.Minute
 	Config.idleTimeoutAsDuration = time.Duration(Config.IdleTimeout) * time.Minute
-	startPeriodicTimeoutTicker(periodicTimeoutCheckInterval)
+	startPeriodicChecks(periodicTimeoutCheckInterval)
 	Config.defender = nil
 	Config.whitelist = nil
 	rateLimiters = make(map[string][]*rateLimiter)
@@ -308,35 +311,18 @@ func AddDefenderEvent(ip string, event HostEvent) {
 	Config.defender.AddEvent(ip, event)
 }
 
-// the ticker cannot be started/stopped from multiple goroutines
-func startPeriodicTimeoutTicker(duration time.Duration) {
-	stopPeriodicTimeoutTicker()
-	periodicTimeoutTicker = time.NewTicker(duration)
-	periodicTimeoutTickerDone = make(chan bool)
-	go func() {
-		counter := int64(0)
+func startPeriodicChecks(duration time.Duration) {
+	startEventScheduler()
+	spec := fmt.Sprintf("@every %s", duration)
+	_, err := eventScheduler.AddFunc(spec, Connections.checkTransfers)
+	util.PanicOnError(err)
+	logger.Info(logSender, "", "scheduled overquota transfers check, schedule %q", spec)
+	if Config.IdleTimeout > 0 {
 		ratio := idleTimeoutCheckInterval / periodicTimeoutCheckInterval
-		for {
-			select {
-			case <-periodicTimeoutTickerDone:
-				return
-			case <-periodicTimeoutTicker.C:
-				counter++
-				if Config.IdleTimeout > 0 && counter >= int64(ratio) {
-					counter = 0
-					Connections.checkIdles()
-				}
-				go Connections.checkTransfers()
-			}
-		}
-	}()
-}
-
-func stopPeriodicTimeoutTicker() {
-	if periodicTimeoutTicker != nil {
-		periodicTimeoutTicker.Stop()
-		periodicTimeoutTickerDone <- true
-		periodicTimeoutTicker = nil
+		spec = fmt.Sprintf("@every %s", duration*ratio)
+		_, err = eventScheduler.AddFunc(spec, Connections.checkIdles)
+		util.PanicOnError(err)
+		logger.Info(logSender, "", "scheduled idle connections check, schedule %q", spec)
 	}
 }
 
@@ -604,6 +590,9 @@ func (c *Configuration) ExecuteStartupHook() error {
 }
 
 func (c *Configuration) executePostDisconnectHook(remoteAddr, protocol, username, connID string, connectionTime time.Time) {
+	startNewHook()
+	defer hookEnded()
+
 	ipAddr := util.GetIPFromRemoteAddress(remoteAddr)
 	connDuration := int64(time.Since(connectionTime) / time.Millisecond)
 
@@ -1161,4 +1150,118 @@ func (c *ConnectionStatus) GetTransfersAsString() string {
 		result += t.getConnectionTransferAsString()
 	}
 	return result
+}
+
+// ActiveQuotaScan defines an active quota scan for a user home dir
+type ActiveQuotaScan struct {
+	// Username to which the quota scan refers
+	Username string `json:"username"`
+	// quota scan start time as unix timestamp in milliseconds
+	StartTime int64 `json:"start_time"`
+}
+
+// ActiveVirtualFolderQuotaScan defines an active quota scan for a virtual folder
+type ActiveVirtualFolderQuotaScan struct {
+	// folder name to which the quota scan refers
+	Name string `json:"name"`
+	// quota scan start time as unix timestamp in milliseconds
+	StartTime int64 `json:"start_time"`
+}
+
+// ActiveScans holds the active quota scans
+type ActiveScans struct {
+	sync.RWMutex
+	UserScans   []ActiveQuotaScan
+	FolderScans []ActiveVirtualFolderQuotaScan
+}
+
+// GetUsersQuotaScans returns the active quota scans for users home directories
+func (s *ActiveScans) GetUsersQuotaScans() []ActiveQuotaScan {
+	s.RLock()
+	defer s.RUnlock()
+
+	scans := make([]ActiveQuotaScan, len(s.UserScans))
+	copy(scans, s.UserScans)
+	return scans
+}
+
+// AddUserQuotaScan adds a user to the ones with active quota scans.
+// Returns false if the user has a quota scan already running
+func (s *ActiveScans) AddUserQuotaScan(username string) bool {
+	s.Lock()
+	defer s.Unlock()
+
+	for _, scan := range s.UserScans {
+		if scan.Username == username {
+			return false
+		}
+	}
+	s.UserScans = append(s.UserScans, ActiveQuotaScan{
+		Username:  username,
+		StartTime: util.GetTimeAsMsSinceEpoch(time.Now()),
+	})
+	return true
+}
+
+// RemoveUserQuotaScan removes a user from the ones with active quota scans.
+// Returns false if the user has no active quota scans
+func (s *ActiveScans) RemoveUserQuotaScan(username string) bool {
+	s.Lock()
+	defer s.Unlock()
+
+	for idx, scan := range s.UserScans {
+		if scan.Username == username {
+			lastIdx := len(s.UserScans) - 1
+			s.UserScans[idx] = s.UserScans[lastIdx]
+			s.UserScans = s.UserScans[:lastIdx]
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetVFoldersQuotaScans returns the active quota scans for virtual folders
+func (s *ActiveScans) GetVFoldersQuotaScans() []ActiveVirtualFolderQuotaScan {
+	s.RLock()
+	defer s.RUnlock()
+	scans := make([]ActiveVirtualFolderQuotaScan, len(s.FolderScans))
+	copy(scans, s.FolderScans)
+	return scans
+}
+
+// AddVFolderQuotaScan adds a virtual folder to the ones with active quota scans.
+// Returns false if the folder has a quota scan already running
+func (s *ActiveScans) AddVFolderQuotaScan(folderName string) bool {
+	s.Lock()
+	defer s.Unlock()
+
+	for _, scan := range s.FolderScans {
+		if scan.Name == folderName {
+			return false
+		}
+	}
+	s.FolderScans = append(s.FolderScans, ActiveVirtualFolderQuotaScan{
+		Name:      folderName,
+		StartTime: util.GetTimeAsMsSinceEpoch(time.Now()),
+	})
+	return true
+}
+
+// RemoveVFolderQuotaScan removes a folder from the ones with active quota scans.
+// Returns false if the folder has no active quota scans
+func (s *ActiveScans) RemoveVFolderQuotaScan(folderName string) bool {
+	s.Lock()
+	defer s.Unlock()
+
+	for idx, scan := range s.FolderScans {
+		if scan.Name == folderName {
+			lastIdx := len(s.FolderScans) - 1
+			s.FolderScans[idx] = s.FolderScans[lastIdx]
+			s.FolderScans = s.FolderScans[:lastIdx]
+			return true
+		}
+	}
+
+	return false
 }

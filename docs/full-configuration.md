@@ -182,6 +182,7 @@ The configuration file contains the following sections:
     - `proxy_allowed`, list of IP addresses and IP ranges allowed to set client IP proxy header such as `X-Forwarded-For`. Any client IP proxy headers, if set on requests from a connection address not in this list, will be silently ignored. Default: empty.
     - `client_ip_proxy_header`, string. Defines the allowed client IP proxy header such as `X-Forwarded-For`, `X-Real-IP` etc. Default: empty
     - `client_ip_header_depth`, integer. Some client IP headers such as `X-Forwarded-For` can contain multiple IP address, this setting define the position to trust starting from the right. For example if we have: `10.0.0.1,11.0.0.1,12.0.0.1,13.0.0.1` and the depth is `0`, SFTPGo will use `13.0.0.1` as client IP, if depth is `1`, `12.0.0.1` will be used and so on. Default: `0`.
+    - `disable_www_auth_header`, boolean. Set to `true` to not add the WWW-Authenticate header after an authentication failure, only the `401` status code will be sent. Default: `false`.
   - `certificate_file`, string. Certificate for WebDAV over HTTPS. This can be an absolute path or a path relative to the config dir.
   - `certificate_key_file`, string. Private key matching the above certificate. This can be an absolute path or a path relative to the config dir. A certificate and a private key are required to enable HTTPS connections. Certificate and key files can be reloaded on demand sending a `SIGHUP` signal on Unix based systems and a `paramchange` request to the running service on Windows.
   - `ca_certificates`, list of strings. Set of root certificate authorities to be used to verify client certificates.
@@ -194,6 +195,9 @@ The configuration file contains the following sections:
     - `exposed_headers`, list of strings.
     - `allow_credentials` boolean.
     - `max_age`, integer.
+    - `options_passthrough`, boolean.
+    - `options_success_status`, integer.
+    - `allow_private_network`, boolean.
   - `cache` struct containing cache configuration for the authenticated users.
     - `enabled`, boolean, set to true to enable user caching. Default: true.
     - `expiration_time`, integer. Expiration time, in minutes, for the cached users. 0 means unlimited. Default: 0.
@@ -277,7 +281,7 @@ The configuration file contains the following sections:
       - `redirect_base_url`, string. Defines the base URL to redirect to after OpenID authentication. The suffix `/web/oidc/redirect` will be added to this base URL, adding also the `web_root` if configured. Default: blank.
       - `username_field`, string. Defines the ID token claims field to map to the SFTPGo username. Default: blank.
       - `scopes`, list of strings. Request the OAuth provider to provide the scope information from an authenticated users. The `openid` scope is mandatory. Default: `"openid", "profile", "email"`.
-      - `role_field`, string. Defines the optional ID token claims field to map to a SFTPGo role. If the defined ID token claims field is set to `admin` the authenticated user is mapped to an SFTPGo admin. You don't need to specify this field if you want to use OpenID only for the Web Client UI. Default: blank.
+      - `role_field`, string. Defines the optional ID token claims field to map to a SFTPGo role. If the defined ID token claims field is set to `admin` the authenticated user is mapped to an SFTPGo admin. You don't need to specify this field if you want to use OpenID only for the Web Client UI. If the field is inside a nested structure, you can use the dot notation to traverse the structures. Default: blank.
       - `implicit_roles`, boolean. If set, the `role_field` is ignored and the SFTPGo role is assumed based on the login link used. Default: `false`.
       - `custom_fields`, list of strings. Custom token claims fields to pass to the pre-login hook. Default: empty.
       - `debug`, boolean. If set, the received id tokens will be logged at debug level. Default: `false`.
@@ -326,6 +330,9 @@ The configuration file contains the following sections:
     - `exposed_headers`, list of strings.
     - `allow_credentials` boolean.
     - `max_age`, integer.
+    - `options_passthrough`, boolean.
+    - `options_success_status`, integer.
+    - `allow_private_network`, boolean.
   - `setup` struct containing configurations for the initial setup screen
     - `installation_code`, string. If set, this installation code will be required when creating the first admin account. Please note that even if set using an environment variable this field is read at SFTPGo startup and not at runtime. This is not a license key or similar, the purpose here is to prevent anyone who can access to the initial setup screen from creating an admin user. Default: blank.
     - `installation_code_hint`, string. Description for the installation code input field. Default: `Installation code`.
